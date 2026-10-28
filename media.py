@@ -58,7 +58,8 @@ def utf16_length(text):
     return len(text.encode('utf-16-le')) // 2
 
 
-async def send_deal(client, body, source, asin, channel_name=None, destination='me'):
+async def send_deal(client, body, source, asin, channel_name=None, destination='me', sender=None):
+    sender = sender if sender is not None else client
     images = await original_images(client,source)
     if images:
         compact = f'Deal • {canonical_url(asin)}\nOriginal post: {source}'
@@ -66,14 +67,14 @@ async def send_deal(client, body, source, asin, channel_name=None, destination='
             compact = f'Channel: {channel_name[:200]}\n' + compact
         caption = body if utf16_length(body) <= 1024 else compact
         try:
-            sent = await client.send_file(destination, images, caption=caption, parse_mode=None)
+            sent = await sender.send_file(destination, images, caption=caption, parse_mode=None)
         except Exception as exc:
-            if type(exc).__name__ not in {'ChatForwardsRestrictedError','FileReferenceExpiredError','MediaEmptyError'}:
+            if type(exc).__name__ not in {'ChatForwardsRestrictedError','FileReferenceExpiredError','MediaEmptyError','BotMediaUnavailable'}:
                 raise
             LOG.warning('Telegram could not reuse original images (%s); sending text.',type(exc).__name__)
         else:
             if caption != body:
                 first = sent[0] if isinstance(sent,(list,tuple)) else sent
-                await client.send_message(destination,body,parse_mode=None,link_preview=False,reply_to=first.id)
+                await sender.send_message(destination,body,parse_mode=None,link_preview=False,reply_to=first.id)
             return
-    await client.send_message(destination,body,parse_mode=None,link_preview=False)
+    await sender.send_message(destination,body,parse_mode=None,link_preview=False)

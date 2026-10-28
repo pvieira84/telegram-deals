@@ -15,6 +15,7 @@ from core import URL, product, price, database, getstate, setstate, record, cano
 from media import send_deal, source_reference
 from schedule import DigestSchedule
 from resolver import resolve_all
+from bot_delivery import BotDelivery
 
 LOG = logging.getLogger('deals')
 
@@ -23,6 +24,7 @@ def log_config(cfg, channel_names=None):
     # Log collector options only; never dump environment variables or credentials.
     options = {
         'destination': cfg.get('destination', 'me'),
+        'delivery_mode': cfg.get('delivery_mode', 'user'),
         'timezone': cfg.get('timezone'),
         'digest_cron': cfg.get('digest_cron'),
         'digest_times': cfg.get('digest_times', ['12:30', '20:30']) if cfg.get('digest_cron') is None else cfg.get('digest_times'),
@@ -88,7 +90,7 @@ async def log_product_sources(client, db, asin, reason):
              asin, max(0, len(sources)-1), summary, selected_peer, selected_name, reason)
 
 
-async def send_pending(client, db, cfg, watch_only=False):
+async def send_pending(client, db, cfg, watch_only=False, sender=None):
     watch = [x.casefold() for x in cfg.get('watch_keywords',[])]
     rows = db.execute('SELECT * FROM deals WHERE pending=1 ORDER BY updated').fetchall()
     sent_count = 0
@@ -104,7 +106,7 @@ async def send_pending(client, db, cfg, watch_only=False):
                  'Original posts:', *[s[0] for s in sources],
                  'Check variant, seller, coupon, Prime and checkout price.'])
         # Delivery is at-least-once: a crash after sending may repeat one entry.
-        await send_deal(client, body, row['source'], row['asin'], channel_name=name, destination=cfg.get('destination', 'me'))
+        await send_deal(client, body, row['source'], row['asin'], channel_name=name, destination=cfg.get('destination', 'me'), sender=sender)
         db.execute('UPDATE deals SET pending=0,notified=1,last_sent=cents WHERE asin=?',(row['asin'],))
         db.commit()
         sent_count += 1
@@ -271,7 +273,13 @@ async def main(command):
                 names[str(channel)] = 'name unavailable'
                 LOG.warning('Channel %s name lookup failed: %s', channel, type(exc).__name__)
         log_config(cfg, names)
-        cfg['destination'] = await validate_destination(client, cfg)
+        mode = cfg.get('delivery_mode', 'user')
+        if mode not in {'user', 'bot'}:
+            raise ValueError('delivery_mode must be "user" or "bot"')
+        cfg['destination'] = destination_value(cfg)
+        if mode == 'user':
+            cfg['destination'] = await validate_destination(client, cfg)
+            LOG.info('Delivery mode: user account')
         if not cfg['channels']:
             raise ValueError('Set at least one channel ID in config.json.')
         if not 0 < cfg['price_drop_percent'] < 100:
@@ -281,16 +289,20 @@ async def main(command):
         db = database('/data/deals.sqlite')
         timeout = aiohttp.ClientTimeout(total=12)
         async with aiohttp.ClientSession(timeout=timeout) as http:
+            sender = None
+            if mode == 'bot':
+                sender = BotDelivery(client, http, os.environ.get('TG_BOT_TOKEN', ''))
+                await sender.validate(cfg['destination'])
             while True:
                 try:
                     await poll(client,db,cfg,http)
-                    await send_pending(client,db,cfg,watch_only=True)
+                    await send_pending(client,db,cfg,watch_only=True,sender=sender)
                     now = datetime.now(zone)
                     # Catch up a missed slot on restart; send only latest due slot.
                     slot = schedule.latest_due(now)
                     if slot:
                         if getstate(db,'digest_slot') != slot:
-                            await send_pending(client,db,cfg)
+                            await send_pending(client,db,cfg,sender=sender)
                             LOG.info('Digest slot %s processed.', slot)
                             setstate(db,'digest_slot',slot)
                             db.commit()

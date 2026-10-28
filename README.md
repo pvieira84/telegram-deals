@@ -1,6 +1,6 @@
 # Telegram deal collector
 
-A personal Docker service that reads selected Telegram channels you already belong to and sends deduplicated Amazon Spain offers to **your Saved Messages**. No bot, AI service or public web port is required.
+A personal Docker service that reads selected Telegram channels you already belong to and sends deduplicated Amazon Spain offers to **your Saved Messages**. Bot delivery is optional; no AI service or public web port is required.
 
 ## Install on your server
 
@@ -299,3 +299,67 @@ It never silently falls back to Saved Messages when delivery fails.
 Start the service after saving the config. Future digests/watchlist alerts and
 any still-pending products use the new destination; already delivered deals are
 not reposted. Photo albums and long-caption replies use the same destination.
+
+
+## Send as a bot so posts arrive as incoming messages
+
+Source collection still uses your existing Telegram account. In bot mode,
+filtered posts are published by a separate bot, so the collector is not sending
+outgoing posts as your personal account. Unread badges and notifications remain
+subject to your Telegram client's settings and whether the channel is open on
+one of your devices; the collector does not forcibly mark messages unread.
+
+1. Create a bot with the official https://t.me/BotFather using `/newbot`.
+2. Add that bot as an administrator of the private destination channel, granting
+   **Post Messages**. The bot does not need access to your source channels.
+3. Put its token in your server's `.env` file, not `config.json` or Git:
+
+   ```dotenv
+   TG_BOT_TOKEN=your_botfather_token
+   ```
+
+   Ensure Compose passes this variable to the container. The repository's
+   `env_file: .env` already does this. Custom Compose configurations can use:
+
+   ```yaml
+   environment:
+     TG_BOT_TOKEN: ${TG_BOT_TOKEN}
+   ```
+
+4. In the active mounted configuration, set:
+
+   ```json
+   "delivery_mode": "bot",
+   "destination": -1001234567890
+   ```
+
+   Use your actual destination ID. Bot mode requires a channel ID; Saved
+   Messages (`"me"`) is available only in user mode. Keep the destination out
+   of the source list. The old/default `"delivery_mode": "user"` keeps existing
+   behaviour until you explicitly switch.
+
+5. Update and rebuild the application image (it includes `bot_delivery.py`),
+   then recreate the container to pick up environment changes. In a deployment
+   with service name `telegram-deals`, run `docker compose up -d --force-recreate
+   telegram-deals` after the image has been rebuilt/updated. A restart alone
+   does not load new environment variables.
+
+Startup checks the token, destination channel, and the bot's posting rights. It
+logs the bot username and destination title, never the token. Your personal
+account does not need posting permission in bot mode. If validation or delivery
+fails, there is no silent fallback to personal-account posting. Failed products
+stay pending; Telegram rate-limit responses are retried with the requested wait.
+
+Photos/albums are downloaded through your existing source-reading account,
+then uploaded through the Bot API. Account-specific media references cannot be
+reused by the bot. Downloads use temporary files, removed after each delivery,
+and are capped at 10 MiB per image. Protected/missing images or rejected photo
+formats fall back to the deal text and original link. A long caption is followed
+by a reply in the same destination channel. The bot token permits control of the
+bot: keep `.env`, Docker access and backups private, and revoke the token through
+BotFather if exposed. No token is printed in HTTP failure messages.
+
+Already delivered products are not reposted when switching delivery modes.
+Delivery remains at-least-once: a crash after a successful send may repeat an
+entry. Live bot delivery requires your token and channel and is not exercised
+by the automated tests.

@@ -1,6 +1,7 @@
 {
   "channels": [],
   "destination": "me",
+  "delivery_mode": "user",
   "timezone": "Europe/Lisbon",
   "digest_cron": "30 12,20 * * *",
   "poll_seconds": 120,
