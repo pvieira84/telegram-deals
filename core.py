@@ -53,6 +53,7 @@ def record(db, asin, body, source, cents, now, drop):
     row = db.execute('SELECT * FROM deals WHERE asin=?',(asin,)).fetchone()
     db.execute('INSERT OR IGNORE INTO origins VALUES (?,?)',(asin,source))
     if row is None:
+        reason = 'first post seen'
         db.execute('INSERT INTO deals(asin,body,source,cents,updated) VALUES(?,?,?,?,?)',
                    (asin,body,source,cents,now))
     else:
@@ -61,7 +62,26 @@ def record(db, asin, body, source, cents, now, drop):
         pending = row['pending'] or (row['notified'] and better and row['last_sent'] is not None
                     and cents <= row['last_sent'] * (1-drop/100))
         if better:
+            reason = 'lower advertised price' if row['cents'] is not None else 'first unambiguous advertised price'
             db.execute('UPDATE deals SET body=?,source=?,cents=?,pending=?,updated=? WHERE asin=?',
                        (body,source,cents,int(pending),now,asin))
         else:
+            reason = 'retained selected post: no lower unambiguous price'
             db.execute('UPDATE deals SET updated=? WHERE asin=?',(now,asin))
+
+    return reason
+
+
+def canonical_url(asin):
+    return f'https://www.amazon.es/dp/{asin}'
+
+
+def product_excerpt(text):
+    """Keep the post text, with retailer URLs replaced by our canonical link below."""
+    def replace(match):
+        url = match.group(0)
+        host = (urlsplit(url).hostname or '').lower()
+        if host in {'amzn.eu', 'amzn.to'} or re.fullmatch(r'(?:[a-z0-9-]+\.)?amazon\.[a-z.]+', host):
+            return '[Amazon link below]'
+        return url
+    return URL.sub(replace, text)[:900]

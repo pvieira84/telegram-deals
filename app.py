@@ -8,7 +8,7 @@ from datetime import datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
-from core import URL, product, price, database, getstate, setstate, record
+from core import URL, product, price, database, getstate, setstate, record, canonical_url, product_excerpt
 
 from media import send_deal, source_reference
 from schedule import DigestSchedule
@@ -16,10 +16,9 @@ from schedule import DigestSchedule
 LOG = logging.getLogger('deals')
 
 
-def log_config(cfg):
+def log_config(cfg, channel_names=None):
     # Log collector options only; never dump environment variables or credentials.
     options = {
-        'channels': cfg.get('channels', []),
         'timezone': cfg.get('timezone'),
         'digest_cron': cfg.get('digest_cron'),
         'digest_times': cfg.get('digest_times', ['12:30', '20:30']) if cfg.get('digest_cron') is None else cfg.get('digest_times'),
@@ -30,10 +29,15 @@ def log_config(cfg):
         'watch_keywords': cfg.get('watch_keywords', []),
         'max_price_eur': cfg.get('max_price_eur'),
     }
-    LOG.info('Collector configuration:')
+    LOG.info('========== Collector configuration ==========')
+    LOG.info('  Channels (%s):', len(cfg.get('channels', [])))
+    for channel in cfg.get('channels', []):
+        name = (channel_names or {}).get(str(channel), 'name unavailable')
+        LOG.info('    %s (%s)', channel, ' '.join(name.split()))
     for key, value in options.items():
-        LOG.info('  %s: %s', key, json.dumps(value, ensure_ascii=False))
-    LOG.info('Active digest schedule: %s', 'digest_cron' if cfg.get('digest_cron') is not None else 'digest_times')
+        LOG.info('  %-20s : %s', key, json.dumps(value, ensure_ascii=False))
+    LOG.info('  %-20s : %s', 'active_schedule', 'digest_cron' if cfg.get('digest_cron') is not None else 'digest_times')
+    LOG.info('=============================================')
 
 
 def log_product_counts(db):
@@ -80,6 +84,25 @@ async def channel_name(client, db, source):
     return ' '.join(name.split())
 
 
+async def log_product_sources(client, db, asin, reason):
+    selected = db.execute('SELECT source FROM deals WHERE asin=?', (asin,)).fetchone()[0]
+    sources = db.execute('SELECT source FROM origins WHERE asin=? ORDER BY source', (asin,)).fetchall()
+    channels = {}
+    for row in sources:
+        ref = source_reference(row['source'])
+        peer = str(ref[0]) if ref else 'unknown'
+        if peer not in channels:
+            name = await channel_name(client, db, row['source'])
+            channels[peer] = {'name': name, 'posts': 0}
+        channels[peer]['posts'] += 1
+    summary = '; '.join(f"{peer} ({info['name']}): {info['posts']} post(s)" for peer, info in channels.items())
+    selected_ref = source_reference(selected)
+    selected_peer = selected_ref[0] if selected_ref else 'unknown'
+    selected_name = await channel_name(client, db, selected)
+    LOG.info('Product %s | Duplicate posts found: %s | Sources: %s | Selected channel: %s (%s) | Selection: %s',
+             asin, max(0, len(sources)-1), summary, selected_peer, selected_name, reason)
+
+
 async def send_pending(client, db, cfg, watch_only=False):
     watch = [x.casefold() for x in cfg.get('watch_keywords',[])]
     rows = db.execute('SELECT * FROM deals WHERE pending=1 ORDER BY updated').fetchall()
@@ -92,7 +115,7 @@ async def send_pending(client, db, cfg, watch_only=False):
         name = await channel_name(client, db, row['source'])
         body = '\n'.join([f"{'Watchlist' if watch_only else 'Deal'} • {amount}",
                  f'Channel: {name}',
-                 row['body'][:900], f"https://www.amazon.es/dp/{row['asin']}",
+                 product_excerpt(row['body']), canonical_url(row['asin']),
                  'Original posts:', *[s[0] for s in sources],
                  'Check variant, seller, coupon, Prime and checkout price.'])
         # Delivery is at-least-once: a crash after sending may repeat one entry.
@@ -106,6 +129,7 @@ async def send_pending(client, db, cfg, watch_only=False):
 async def poll(client, db, cfg, http):
     from telethon import utils
     from telethon.tl.types import MessageEntityTextUrl
+    observed = {}
     for channel in cfg['channels']:
         entity = await client.get_entity(channel)
         chatid = utils.get_peer_id(entity)
@@ -144,9 +168,13 @@ async def poll(client, db, cfg, http):
                     else:
                         source = f'https://t.me/c/{entity.id}/{msg.id}'
                     for asin in asins:
-                        record(db,asin,text,source,cents,int(time.time()),cfg['price_drop_percent'])
+                        observed[asin] = record(db,asin,text,source,cents,int(time.time()),cfg['price_drop_percent'])
             setstate(db,key,msg.id)
             db.commit()
+
+    for asin, reason in observed.items():
+        await log_product_sources(client, db, asin, reason)
+    db.commit()
 
 async def main(command):
     from telethon import TelegramClient
@@ -155,7 +183,6 @@ async def main(command):
     Path('/data').mkdir(exist_ok=True)
     if command == 'run':
         cfg = json.loads(Path('/app/config.json').read_text())
-        log_config(cfg)
     api_id = int(os.environ['TG_API_ID'])
     client = TelegramClient('/data/telegram',api_id,os.environ['TG_API_HASH'],flood_sleep_threshold=60)
     if command == 'login':
@@ -172,6 +199,15 @@ async def main(command):
                 if dialog.is_channel or dialog.is_group:
                     print(f'{dialog.id}\t{dialog.name}')
             return
+        names = {}
+        for channel in cfg.get('channels', []):
+            try:
+                entity = await client.get_entity(channel)
+                names[str(channel)] = getattr(entity, 'title', None) or getattr(entity, 'username', None) or str(channel)
+            except Exception as exc:
+                names[str(channel)] = 'name unavailable'
+                LOG.warning('Channel %s name lookup failed: %s', channel, type(exc).__name__)
+        log_config(cfg, names)
         if not cfg['channels']:
             raise ValueError('Set at least one channel ID in config.json.')
         if not 0 < cfg['price_drop_percent'] < 100:

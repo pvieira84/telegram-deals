@@ -2,6 +2,7 @@
 import logging
 import re
 from urllib.parse import urlsplit
+from core import canonical_url
 
 LOG = logging.getLogger('deals')
 
@@ -60,7 +61,7 @@ def utf16_length(text):
 async def send_deal(client, body, source, asin, channel_name=None):
     images = await original_images(client,source)
     if images:
-        compact = f'Deal • https://www.amazon.es/dp/{asin}\nOriginal post: {source}'
+        compact = f'Deal • {canonical_url(asin)}\nOriginal post: {source}'
         if channel_name:
             compact = f'Channel: {channel_name[:200]}\n' + compact
         caption = body if utf16_length(body) <= 1024 else compact

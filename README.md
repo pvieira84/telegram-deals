@@ -168,3 +168,32 @@ same slot. New schedules can trigger immediately if a slot earlier today is due.
 Spring-forward nonexistent times are skipped; repeated autumn wall-clock slots
 run once. Configuration is checked at startup. Logs now report stored/pending
 product counts and digest delivery counts, including zero.
+
+## Source and duplicate logging
+
+Startup configuration is printed as an aligned block with one channel ID/name
+per line. Channel titles are resolved after Telegram authorisation; unavailable
+titles are labelled explicitly. Credentials and environment variables are not
+printed.
+
+Each collection cycle logs one source summary per product observed in that
+cycle, after all configured channels have been scanned. `Duplicate posts found`
+is the number of distinct stored source posts minus one, including previous
+cycles. Re-reading the same source post does not count again. The summary lists
+all contributing channels with their post counts, the selected channel, and the
+selection decision. This reflects sources seen so far, not posts that arrive in
+future cycles. Lower unambiguous advertised prices replace the selected post;
+equal, higher or unclear prices retain it. If no price was clear before, the
+first unambiguous price is selected.
+
+Watchlist and scheduled digests are separate delivery passes. A zero watchlist
+count followed by a nonzero digest is normal: no pending deals matched watchlist
+keywords, but other products were due in the scheduled digest. `Products
+collected` is the cumulative unique-product count; `Pending products` counts
+products still queued after delivery.
+
+Outgoing post excerpts replace original Amazon/retail-shortener URLs with a
+placeholder, followed by the selected product's single canonical Amazon link:
+`https://www.amazon.es/dp/ASIN`. Affiliate parameters and shortened Amazon links
+are not carried into the outgoing text. Original Telegram source links remain.
+This also applies to old pending products, without modifying stored raw posts.
