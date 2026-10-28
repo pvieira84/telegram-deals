@@ -10,7 +10,7 @@ from zoneinfo import ZoneInfo
 
 from core import URL, product, price, database, getstate, setstate, record
 
-from media import send_deal
+from media import send_deal, source_reference
 from schedule import DigestSchedule
 
 LOG = logging.getLogger('deals')
@@ -64,6 +64,22 @@ async def resolve(url, http):
             return None
     return None
 
+async def channel_name(client, db, source):
+    ref = source_reference(source)
+    if ref is None:
+        return 'Unknown channel'
+    peer, _ = ref
+    name = getstate(db, f'channel_name:{peer}')
+    if name is None:
+        try:
+            entity = await client.get_entity(peer)
+            name = getattr(entity, 'title', None) or getattr(entity, 'username', None) or str(peer)
+            setstate(db, f'channel_name:{peer}', name)
+        except Exception:
+            name = str(peer)
+    return ' '.join(name.split())
+
+
 async def send_pending(client, db, cfg, watch_only=False):
     watch = [x.casefold() for x in cfg.get('watch_keywords',[])]
     rows = db.execute('SELECT * FROM deals WHERE pending=1 ORDER BY updated').fetchall()
@@ -73,12 +89,14 @@ async def send_pending(client, db, cfg, watch_only=False):
             continue
         sources = db.execute('SELECT source FROM origins WHERE asin=? LIMIT 4',(row['asin'],)).fetchall()
         amount = f"€{row['cents']/100:.2f} advertised" if row['cents'] is not None else 'Price unclear—check original post'
+        name = await channel_name(client, db, row['source'])
         body = '\n'.join([f"{'Watchlist' if watch_only else 'Deal'} • {amount}",
+                 f'Channel: {name}',
                  row['body'][:900], f"https://www.amazon.es/dp/{row['asin']}",
                  'Original posts:', *[s[0] for s in sources],
                  'Check variant, seller, coupon, Prime and checkout price.'])
         # Delivery is at-least-once: a crash after sending may repeat one entry.
-        await send_deal(client, body, row['source'], row['asin'])
+        await send_deal(client, body, row['source'], row['asin'], channel_name=name)
         db.execute('UPDATE deals SET pending=0,notified=1,last_sent=cents WHERE asin=?',(row['asin'],))
         db.commit()
         sent_count += 1
@@ -91,6 +109,10 @@ async def poll(client, db, cfg, http):
     for channel in cfg['channels']:
         entity = await client.get_entity(channel)
         chatid = utils.get_peer_id(entity)
+        name = getattr(entity, 'title', None) or getattr(entity, 'username', None) or str(chatid)
+        setstate(db, f'channel_name:{chatid}', name)
+        if getattr(entity, 'username', None):
+            setstate(db, f'channel_name:{entity.username}', name)
         key = f'cursor:{chatid}'
         cursor = getstate(db,key)
         if cursor is None:

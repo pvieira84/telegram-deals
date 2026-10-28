@@ -57,10 +57,12 @@ def utf16_length(text):
     return len(text.encode('utf-16-le')) // 2
 
 
-async def send_deal(client, body, source, asin):
+async def send_deal(client, body, source, asin, channel_name=None):
     images = await original_images(client,source)
     if images:
         compact = f'Deal • https://www.amazon.es/dp/{asin}\nOriginal post: {source}'
+        if channel_name:
+            compact = f'Channel: {channel_name[:200]}\n' + compact
         caption = body if utf16_length(body) <= 1024 else compact
         try:
             sent = await client.send_file('me', images, caption=caption, parse_mode=None)
