@@ -22,6 +22,7 @@ LOG = logging.getLogger('deals')
 def log_config(cfg, channel_names=None):
     # Log collector options only; never dump environment variables or credentials.
     options = {
+        'destination': cfg.get('destination', 'me'),
         'timezone': cfg.get('timezone'),
         'digest_cron': cfg.get('digest_cron'),
         'digest_times': cfg.get('digest_times', ['12:30', '20:30']) if cfg.get('digest_cron') is None else cfg.get('digest_times'),
@@ -103,7 +104,7 @@ async def send_pending(client, db, cfg, watch_only=False):
                  'Original posts:', *[s[0] for s in sources],
                  'Check variant, seller, coupon, Prime and checkout price.'])
         # Delivery is at-least-once: a crash after sending may repeat one entry.
-        await send_deal(client, body, row['source'], row['asin'], channel_name=name)
+        await send_deal(client, body, row['source'], row['asin'], channel_name=name, destination=cfg.get('destination', 'me'))
         db.execute('UPDATE deals SET pending=0,notified=1,last_sent=cents WHERE asin=?',(row['asin'],))
         db.commit()
         sent_count += 1
@@ -210,6 +211,34 @@ async def poll(client, db, cfg, http):
         await log_product_sources(client, db, asin, reason)
     db.commit()
 
+def destination_value(cfg):
+    value = cfg.get('destination', 'me')
+    if value == 'me':
+        return value
+    if isinstance(value, str) and value.startswith('-100') and value[1:].isdigit():
+        value = int(value)
+    if isinstance(value, bool) or not isinstance(value, int) or not str(value).startswith('-100'):
+        raise ValueError('destination must be "me" or a numeric channel ID beginning -100')
+    if str(value) in {str(channel) for channel in cfg.get('channels', [])}:
+        raise ValueError('The destination channel must not also be a source channel')
+    return value
+
+
+async def validate_destination(client, cfg):
+    destination = destination_value(cfg)
+    if destination == 'me':
+        return destination
+    entity = await client.get_entity(destination)
+    rights = getattr(entity, 'admin_rights', None)
+    if not getattr(entity, 'broadcast', False):
+        raise ValueError('destination must be a Telegram channel')
+    if not (getattr(entity, 'creator', False) or (rights and getattr(rights, 'post_messages', False))):
+        raise ValueError('The logged-in Telegram account needs permission to post in the destination channel')
+    name = ' '.join((getattr(entity, 'title', None) or str(destination)).split())
+    LOG.info('Destination channel: %s (%s)', destination, name)
+    return destination
+
+
 async def main(command):
     from telethon import TelegramClient
     import aiohttp
@@ -242,6 +271,7 @@ async def main(command):
                 names[str(channel)] = 'name unavailable'
                 LOG.warning('Channel %s name lookup failed: %s', channel, type(exc).__name__)
         log_config(cfg, names)
+        cfg['destination'] = await validate_destination(client, cfg)
         if not cfg['channels']:
             raise ValueError('Set at least one channel ID in config.json.')
         if not 0 < cfg['price_drop_percent'] < 100:

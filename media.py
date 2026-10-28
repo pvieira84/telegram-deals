@@ -58,7 +58,7 @@ def utf16_length(text):
     return len(text.encode('utf-16-le')) // 2
 
 
-async def send_deal(client, body, source, asin, channel_name=None):
+async def send_deal(client, body, source, asin, channel_name=None, destination='me'):
     images = await original_images(client,source)
     if images:
         compact = f'Deal • {canonical_url(asin)}\nOriginal post: {source}'
@@ -66,7 +66,7 @@ async def send_deal(client, body, source, asin, channel_name=None):
             compact = f'Channel: {channel_name[:200]}\n' + compact
         caption = body if utf16_length(body) <= 1024 else compact
         try:
-            sent = await client.send_file('me', images, caption=caption, parse_mode=None)
+            sent = await client.send_file(destination, images, caption=caption, parse_mode=None)
         except Exception as exc:
             if type(exc).__name__ not in {'ChatForwardsRestrictedError','FileReferenceExpiredError','MediaEmptyError'}:
                 raise
@@ -74,6 +74,6 @@ async def send_deal(client, body, source, asin, channel_name=None):
         else:
             if caption != body:
                 first = sent[0] if isinstance(sent,(list,tuple)) else sent
-                await client.send_message('me',body,parse_mode=None,link_preview=False,reply_to=first.id)
+                await client.send_message(destination,body,parse_mode=None,link_preview=False,reply_to=first.id)
             return
-    await client.send_message('me',body,parse_mode=None,link_preview=False)
+    await client.send_message(destination,body,parse_mode=None,link_preview=False)

@@ -265,3 +265,37 @@ cover representative HTML and redirect responses rather than a live page.
 
 Rebuild the image after updating: `resolver.py` is a new application module.
 This affects new posts; previously skipped messages are not replayed.
+
+
+## Private Telegram destination channel
+
+Create a private channel using the same Telegram account used during collector
+login, or add that account as an administrator with permission to post. No bot
+is needed. Keep the channel private and its invite link unshared if this is a
+personal feed.
+
+After upgrading/rebuilding, stop the collector before listing channels so the
+interactive command does not share a live SQLite session with the service:
+
+```sh
+docker compose stop collector
+docker compose run --rm collector channels
+```
+
+Use your deployment's service name (`telegram-deals` if renamed). Find the new
+channel's `-100...` ID and add it to the active mounted config:
+
+```json
+"destination": -1001234567890
+```
+
+Use your actual channel ID. Keep it out of the source `channels` array. Numeric
+IDs or numeric strings are accepted; invite links and usernames are not used as
+destinations. The default/missing setting `"destination": "me"` keeps Saved
+Messages. At startup the collector resolves the destination and requires it to
+be a channel where the logged-in account is the creator or has post permission.
+It never silently falls back to Saved Messages when delivery fails.
+
+Start the service after saving the config. Future digests/watchlist alerts and
+any still-pending products use the new destination; already delivered deals are
+not reposted. Photo albums and long-caption replies use the same destination.
