@@ -77,7 +77,7 @@ Example filters: `"include_keywords": ["ssd", "aspirador"]`, `"exclude_keywords"
 - The lowest clear price seen is retained. There is no stock/expiry detection, so it may become stale. No repeat alert is sent at the same or a higher price, even weeks later. No Keepa integration is included.
 - Edited/deleted posts are not reprocessed. Fresh posts are collected. Removed sources remain in the local history.
 - If the server misses a digest slot, pending deals are sent after restart once a slot is due that day. No empty digest is sent. Watchlist entries are not repeated in the following digest.
-- Delivery is at-least-once: a crash just after sending may repeat an entry. A source access failure delays later sources until that source is fixed/removed; logs show the exception type without exposing content or credentials.
+- Delivery is at-least-once: a crash just after sending may repeat an entry. A source access failure is logged and later sources are still scanned; the failed source resumes from its last saved cursor on the next cycle. Telegram rate-limit waits pause requests instead of continuing to issue calls.
 
 ## Operations and privacy
 
@@ -197,3 +197,23 @@ placeholder, followed by the selected product's single canonical Amazon link:
 `https://www.amazon.es/dp/ASIN`. Affiliate parameters and shortened Amazon links
 are not carried into the outgoing text. Original Telegram source links remain.
 This also applies to old pending products, without modifying stored raw posts.
+
+
+## Per-channel scan diagnostics
+
+Every cycle logs a summary for every configured channel, including quiet ones:
+messages scanned, links inspected, posts with recognised Amazon products,
+accepted posts, product matches, newly stored products, posts with no recognised
+product, keyword/price exclusions, and the cursor before/after scanning. These
+counts refer to new posts since that channel's saved cursor, not its full history.
+A first-time channel is explicitly logged as initialised without historical import.
+A final summary reports successful/failed channel scans.
+
+Unrecognised or unresolved links are counted by hostname only (no full URLs or
+query strings). A channel with messages but no recognised products may use an
+unsupported link shortener, external landing page, a different Amazon locale,
+or image-only promotions. A hostname count is diagnostic, not proof of which
+case applies. Only allowlisted retail links are resolved; arbitrary websites
+are not followed. Share a representative post/link if a source needs a new
+supported format. Product summaries alone show successful matches and do not
+indicate which other channels were scanned.

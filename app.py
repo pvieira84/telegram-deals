@@ -4,6 +4,8 @@ import json
 import logging
 import os
 import time
+from collections import Counter
+from urllib.parse import urlsplit
 from datetime import datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -126,52 +128,100 @@ async def send_pending(client, db, cfg, watch_only=False):
         await asyncio.sleep(1)
     LOG.info('%s delivery: %s products sent.', 'Watchlist' if watch_only else 'Digest', sent_count)
 
-async def poll(client, db, cfg, http):
+async def poll_channel(client, db, cfg, http, channel, observed):
     from telethon import utils
     from telethon.tl.types import MessageEntityTextUrl
-    observed = {}
-    for channel in cfg['channels']:
-        entity = await client.get_entity(channel)
-        chatid = utils.get_peer_id(entity)
-        name = getattr(entity, 'title', None) or getattr(entity, 'username', None) or str(chatid)
-        setstate(db, f'channel_name:{chatid}', name)
-        if getattr(entity, 'username', None):
-            setstate(db, f'channel_name:{entity.username}', name)
-        key = f'cursor:{chatid}'
-        cursor = getstate(db,key)
-        if cursor is None:
-            latest = await client.get_messages(entity,limit=1)
-            setstate(db,key,latest[0].id if latest else 0)
-            db.commit()
-            LOG.info('Initialised source %s; collecting new posts from now.',chatid)
-            continue
-        async for msg in client.iter_messages(entity,min_id=int(cursor),reverse=True):
-            text = msg.raw_text or ''
-            urls = URL.findall(text)
-            urls.extend(e.url for e in (msg.entities or []) if isinstance(e,MessageEntityTextUrl))
-            urls.extend(b.url for line in (msg.buttons or []) for b in line if b.url)
-            asins = set()
-            for url in set(urls):
-                asin = await resolve(url.rstrip(').,;!'),http)
-                if asin:
-                    asins.add(asin)
+    entity = await client.get_entity(channel)
+    chatid = utils.get_peer_id(entity)
+    name = ' '.join((getattr(entity, 'title', None) or getattr(entity, 'username', None) or str(chatid)).split())
+    setstate(db, f'channel_name:{chatid}', name)
+    if getattr(entity, 'username', None):
+        setstate(db, f'channel_name:{entity.username}', name)
+    key = f'cursor:{chatid}'
+    cursor = getstate(db,key)
+    if cursor is None:
+        latest = await client.get_messages(entity,limit=1)
+        setstate(db,key,latest[0].id if latest else 0)
+        db.commit()
+        LOG.info('Channel %s (%s) | Initialised at message %s; collecting new posts from now.',
+                 chatid, name, getstate(db,key))
+        return
+    start_cursor = cursor
+    counts = Counter()
+    unrecognised_hosts = Counter()
+    async for msg in client.iter_messages(entity,min_id=int(cursor),reverse=True):
+        counts['scanned'] += 1
+        text = msg.raw_text or ''
+        urls = URL.findall(text)
+        urls.extend(e.url for e in (msg.entities or []) if isinstance(e,MessageEntityTextUrl))
+        urls.extend(b.url for line in (msg.buttons or []) for b in line if b.url)
+        asins = set()
+        for url in set(urls):
+            counts['links'] += 1
+            cleaned = url.rstrip(').,;!')
+            asin = await resolve(cleaned,http)
+            if asin:
+                asins.add(asin)
+            else:
+                # Hostnames only: never print affiliate query strings or full URLs.
+                try:
+                    host = urlsplit(cleaned).hostname
+                except ValueError:
+                    host = None
+                unrecognised_hosts[host or 'invalid-url'] += 1
+        if not asins:
+            counts['no_product'] += 1
+        else:
+            counts['recognised_posts'] += 1
             folded = text.casefold()
             include = cfg.get('include_keywords',[])
             exclude = cfg.get('exclude_keywords',[])
             accepted = (not include or any(w.casefold() in folded for w in include)) and not any(w.casefold() in folded for w in exclude)
-            if accepted:
+            if not accepted:
+                counts['keyword_filtered'] += 1
+            else:
                 cents = price(text) if len(asins)==1 else None
                 maximum = cfg.get('max_price_eur')
-                if maximum is None or cents is None or cents <= maximum*100:
+                if maximum is not None and cents is not None and cents > maximum*100:
+                    counts['price_filtered'] += 1
+                else:
+                    counts['accepted_posts'] += 1
                     if getattr(entity,'username',None):
                         source = f'https://t.me/{entity.username}/{msg.id}'
                     else:
                         source = f'https://t.me/c/{entity.id}/{msg.id}'
                     for asin in asins:
+                        if db.execute('SELECT 1 FROM deals WHERE asin=?',(asin,)).fetchone() is None:
+                            counts['new_products'] += 1
+                        counts['product_matches'] += 1
                         observed[asin] = record(db,asin,text,source,cents,int(time.time()),cfg['price_drop_percent'])
-            setstate(db,key,msg.id)
-            db.commit()
+        setstate(db,key,msg.id)
+        db.commit()
+    LOG.info('Channel %s (%s) | Messages scanned: %s | Links inspected: %s | Posts with recognised Amazon products: %s | Accepted posts: %s | Product matches: %s | New products: %s | No recognised product: %s | Keyword filtered: %s | Price filtered: %s | Cursor: %s -> %s',
+             chatid, name, counts['scanned'], counts['links'], counts['recognised_posts'],
+             counts['accepted_posts'], counts['product_matches'], counts['new_products'],
+             counts['no_product'], counts['keyword_filtered'], counts['price_filtered'],
+             start_cursor, getstate(db,key))
+    if unrecognised_hosts:
+        LOG.info('Channel %s (%s) | Unrecognised/unresolved link hosts: %s', chatid, name,
+                 ', '.join(f'{host}: {count}' for host,count in sorted(unrecognised_hosts.items())))
 
+
+async def poll(client, db, cfg, http):
+    observed = {}
+    succeeded = failed = 0
+    for channel in cfg['channels']:
+        try:
+            await poll_channel(client, db, cfg, http, channel, observed)
+            succeeded += 1
+        except Exception as exc:
+            LOG.error('Channel %s | Scan failed: %s; saved cursor retained for retry.', channel, type(exc).__name__)
+            if type(exc).__name__ == 'FloodWaitError':
+                # Do not continue issuing calls while Telegram requires a wait.
+                await asyncio.sleep(max(1, getattr(exc, 'seconds', 60)))
+                raise
+            failed += 1
+    LOG.info('Channel scans completed: %s/%s successful, %s failed.', succeeded, len(cfg['channels']), failed)
     for asin, reason in observed.items():
         await log_product_sources(client, db, asin, reason)
     db.commit()
