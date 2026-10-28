@@ -1,0 +1,11 @@
+{
+  "channels": [],
+  "timezone": "Europe/Lisbon",
+  "digest_times": ["12:30", "20:30"],
+  "poll_seconds": 120,
+  "price_drop_percent": 5,
+  "include_keywords": [],
+  "exclude_keywords": [],
+  "watch_keywords": [],
+  "max_price_eur": null
+}

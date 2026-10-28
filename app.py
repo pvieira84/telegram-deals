@@ -1,0 +1,154 @@
+import argparse
+import asyncio
+import json
+import logging
+import os
+import time
+from datetime import datetime
+from pathlib import Path
+from zoneinfo import ZoneInfo
+
+from core import URL, product, price, database, getstate, setstate, record
+
+LOG = logging.getLogger('deals')
+
+async def resolve(url, http):
+    # Follow only explicitly configured retail shorteners. No arbitrary URL fetching.
+    from urllib.parse import urlsplit, urljoin
+    current = url
+    for _ in range(6):
+        asin = product(current)
+        if asin:
+            return asin
+        u = urlsplit(current)
+        if u.scheme != 'https' or u.port not in (None,443) or u.username or u.password:
+            return None
+        if (u.hostname or '').lower() not in {'amzn.eu','amzn.to','www.amazon.es','amazon.es'}:
+            return None
+        try:
+            async with http.get(current, allow_redirects=False) as response:
+                if response.status not in (301,302,303,307,308):
+                    return None
+                current = urljoin(current, response.headers.get('Location',''))
+        except Exception:
+            LOG.warning('A retail link could not be resolved (details omitted).')
+            return None
+    return None
+
+async def send_pending(client, db, cfg, watch_only=False):
+    watch = [x.casefold() for x in cfg.get('watch_keywords',[])]
+    rows = db.execute('SELECT * FROM deals WHERE pending=1 ORDER BY updated').fetchall()
+    for row in rows:
+        if watch_only and not any(w in row['body'].casefold() for w in watch):
+            continue
+        sources = db.execute('SELECT source FROM origins WHERE asin=? LIMIT 4',(row['asin'],)).fetchall()
+        amount = f"€{row['cents']/100:.2f} advertised" if row['cents'] is not None else 'Price unclear—check original post'
+        body = '\n'.join([f"{'Watchlist' if watch_only else 'Deal'} • {amount}",
+                 row['body'][:900], f"https://www.amazon.es/dp/{row['asin']}",
+                 'Original posts:', *[s[0] for s in sources],
+                 'Check variant, seller, coupon, Prime and checkout price.'])
+        # Delivery is at-least-once: a crash after sending may repeat one entry.
+        await client.send_message('me', body, parse_mode=None, link_preview=False)
+        db.execute('UPDATE deals SET pending=0,notified=1,last_sent=cents WHERE asin=?',(row['asin'],))
+        db.commit()
+        await asyncio.sleep(1)
+
+async def poll(client, db, cfg, http):
+    from telethon import utils
+    from telethon.tl.types import MessageEntityTextUrl
+    for channel in cfg['channels']:
+        entity = await client.get_entity(channel)
+        chatid = utils.get_peer_id(entity)
+        key = f'cursor:{chatid}'
+        cursor = getstate(db,key)
+        if cursor is None:
+            latest = await client.get_messages(entity,limit=1)
+            setstate(db,key,latest[0].id if latest else 0)
+            db.commit()
+            LOG.info('Initialised source %s; collecting new posts from now.',chatid)
+            continue
+        async for msg in client.iter_messages(entity,min_id=int(cursor),reverse=True):
+            text = msg.raw_text or ''
+            urls = URL.findall(text)
+            urls.extend(e.url for e in (msg.entities or []) if isinstance(e,MessageEntityTextUrl))
+            urls.extend(b.url for line in (msg.buttons or []) for b in line if b.url)
+            asins = set()
+            for url in set(urls):
+                asin = await resolve(url.rstrip(').,;!'),http)
+                if asin:
+                    asins.add(asin)
+            folded = text.casefold()
+            include = cfg.get('include_keywords',[])
+            exclude = cfg.get('exclude_keywords',[])
+            accepted = (not include or any(w.casefold() in folded for w in include)) and not any(w.casefold() in folded for w in exclude)
+            if accepted:
+                cents = price(text) if len(asins)==1 else None
+                maximum = cfg.get('max_price_eur')
+                if maximum is None or cents is None or cents <= maximum*100:
+                    if getattr(entity,'username',None):
+                        source = f'https://t.me/{entity.username}/{msg.id}'
+                    else:
+                        source = f'https://t.me/c/{entity.id}/{msg.id}'
+                    for asin in asins:
+                        record(db,asin,text,source,cents,int(time.time()),cfg['price_drop_percent'])
+            setstate(db,key,msg.id)
+            db.commit()
+
+async def main(command):
+    from telethon import TelegramClient
+    import aiohttp
+    os.umask(0o077)
+    Path('/data').mkdir(exist_ok=True)
+    api_id = int(os.environ['TG_API_ID'])
+    client = TelegramClient('/data/telegram',api_id,os.environ['TG_API_HASH'],flood_sleep_threshold=60)
+    if command == 'login':
+        await client.start()
+        print('Authorised. Session saved in the Docker data volume.')
+        await client.disconnect()
+        return
+    await client.connect()
+    try:
+        if not await client.is_user_authorized():
+            raise RuntimeError('Run the interactive login command first.')
+        if command == 'channels':
+            async for dialog in client.iter_dialogs():
+                if dialog.is_channel or dialog.is_group:
+                    print(f'{dialog.id}\t{dialog.name}')
+            return
+        cfg = json.loads(Path('/app/config.json').read_text())
+        if not cfg['channels']:
+            raise ValueError('Set at least one channel ID in config.json.')
+        if not 0 < cfg['price_drop_percent'] < 100:
+            raise ValueError('price_drop_percent must be between 0 and 100.')
+        for slot in cfg['digest_times']:
+            datetime.strptime(slot,'%H:%M')
+        zone = ZoneInfo(cfg['timezone'])
+        db = database('/data/deals.sqlite')
+        timeout = aiohttp.ClientTimeout(total=12)
+        async with aiohttp.ClientSession(timeout=timeout) as http:
+            while True:
+                try:
+                    await poll(client,db,cfg,http)
+                    await send_pending(client,db,cfg,watch_only=True)
+                    now = datetime.now(zone)
+                    # Catch up a missed slot on restart; send only latest due slot.
+                    due = [s for s in cfg['digest_times'] if s <= now.strftime('%H:%M')]
+                    if due:
+                        slot = now.strftime('%Y-%m-%d')+' '+max(due)
+                        if getstate(db,'digest_slot') != slot:
+                            await send_pending(client,db,cfg)
+                            setstate(db,'digest_slot',slot)
+                            db.commit()
+                    LOG.info('Collection cycle completed.')
+                except Exception as exc:
+                    LOG.error('Cycle failed: %s; retrying next cycle.',type(exc).__name__)
+                await asyncio.sleep(max(30,cfg.get('poll_seconds',120)))
+    finally:
+        await client.disconnect()
+
+if __name__ == '__main__':
+    logging.basicConfig(level=logging.INFO,format='%(asctime)s %(levelname)s %(message)s')
+    logging.getLogger('telethon').setLevel(logging.WARNING)
+    p = argparse.ArgumentParser()
+    p.add_argument('command',choices=['login','channels','run'])
+    asyncio.run(main(p.parse_args().command))
