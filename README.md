@@ -46,7 +46,7 @@ Requires Docker with the Compose plugin (`docker compose version`). Extract this
    docker compose logs --tail=50 -f
    ```
 
-On the first cycle each source starts **from its newest message**. Historical posts are not imported. New messages are polled every two minutes; the persistent cursor catches up after downtime. Check Saved Messages after the next scheduled digest. For a quick check, temporarily add the current Lisbon time plus a few minutes to `digest_times`, restart, and wait for a new qualifying post.
+On the first cycle each source starts **from its newest message**. Historical posts are not imported. New messages are polled every two minutes; the persistent cursor catches up after downtime. Check Saved Messages after the next scheduled digest. For a quick check, temporarily add the current Lisbon time plus a few minutes to `digest_times` (or adjust `digest_cron`), restart, and wait for a new qualifying post.
 
 ## Configuration
 
@@ -56,7 +56,8 @@ After editing `config.json`, run `docker compose restart collector`.
 |---|---|
 | `channels` | Numeric IDs of sources you already belong to. Only these histories are collected. |
 | `timezone` | IANA zone; default Europe/Lisbon, including daylight saving. |
-| `digest_times` | Local 24-hour times; defaults 12:30 and 20:30. |
+| `digest_cron` | Numeric five-field cron string, or list of strings; takes precedence over digest_times. |
+| `digest_times` | Legacy HH:MM list, supported when digest_cron is absent. |
 | `poll_seconds` | Poll interval, minimum 30 seconds. |
 | `price_drop_percent` | Resurface an offer when its clear advertised price is at least this much below the last sent price. Default 5. |
 | `include_keywords` | Case-insensitive substring matches; empty means include everything. Any match qualifies. |
@@ -94,10 +95,76 @@ To revoke access, terminate this application's session from Telegram Settings â†
 
 ## Validation and limits
 
-Run core tests without third-party dependencies:
+Run the tests without third-party dependencies:
 
 ```sh
 python3 -m unittest discover -s tests -v
 ```
 
 The delivered package has unit coverage for product identity, locale price parsing, cross-source merging and meaningful price drops. Live login, channel access, redirect resolution and sending require your server/account and must be verified there. Runtime API reference: https://docs.telethon.dev/en/stable/modules/client.html.
+
+
+## Original post images
+
+Digest and watchlist messages now reuse images from the selected original post.
+Photo albums are kept together (up to ten images); image documents are also
+included. Neighbouring posts are excluded by matching the Telegram album ID.
+If the digest text exceeds Telegram's caption limit, the images have a compact
+caption and the complete digest text is sent as a reply.
+
+Images are fetched from Telegram at delivery time, including for deals already
+pending before this update. No database migration, media download folder or
+new volume is needed. Photos are not permanently cached: deleted posts, lost
+source access, or protected-content restrictions may cause a text-only delivery
+with the original link. Link-preview thumbnails and videos are not copied.
+Already delivered products are not resent by upgrading. For a multi-product
+post, each product receives the original post's images; images are not assigned
+to individual products automatically.
+
+After updating the source, rebuild the running service. For the repository's
+Compose service: `docker compose up -d --build collector`. If your deployment
+renames the service to `telegram-deals`, use that name instead and keep your
+existing configuration and data mounts. Deployments using a prebuilt image
+must rebuild/publish that image first; a restart alone does not update code.
+
+
+## Cron digest schedules
+
+Replace the `digest_times` setting in your active configuration with, for example:
+
+```json
+"digest_cron": "*/30 9-22 * * *"
+```
+
+This sends pending deals every 30 minutes, from 09:00 through 22:59, in your
+configured timezone. The fields are **minute hour day-of-month month weekday**.
+Supported syntax: numeric values, `*`, comma-separated lists, ranges and positive
+steps. Weekdays use 0/7 for Sunday through 6 for Saturday. Names, macros,
+seconds, `L`, `W` and `#` extensions are not supported. When both day-of-month
+and weekday are restricted, either can match (standard cron OR behaviour).
+
+| Schedule | Expression |
+|---|---|
+| Every hour | `0 * * * *` |
+| Every 15 minutes | `*/15 * * * *` |
+| Every two hours at :00 | `0 */2 * * *` |
+| Weekdays at 09:00 and 18:00 | `0 9,18 * * 1-5` |
+| Daily at 12:30 and 20:30 | `30 12,20 * * *` |
+
+For different minutes at different hours, use a list. Your earlier three times
+can be expressed as:
+
+```json
+"digest_cron": ["30 12,20 * * *", "0 17 * * *"]
+```
+
+Existing configurations with only `digest_times` keep working. If both keys are
+present, `digest_cron` wins. Restart after configuration changes. Delivery occurs
+on the next completed poll, not at the exact second; schedules faster than the
+poll interval are coalesced. On startup/recovery the latest due slot **today**
+is processed once; missed slots are not replayed individually. No empty message
+is sent. The existing digest-slot state prevents a restart from repeating the
+same slot. New schedules can trigger immediately if a slot earlier today is due.
+Spring-forward nonexistent times are skipped; repeated autumn wall-clock slots
+run once. Configuration is checked at startup. Logs now report stored/pending
+product counts and digest delivery counts, including zero.

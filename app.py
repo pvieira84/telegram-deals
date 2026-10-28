@@ -10,6 +10,9 @@ from zoneinfo import ZoneInfo
 
 from core import URL, product, price, database, getstate, setstate, record
 
+from media import send_deal
+from schedule import DigestSchedule
+
 LOG = logging.getLogger('deals')
 
 async def resolve(url, http):
@@ -38,6 +41,7 @@ async def resolve(url, http):
 async def send_pending(client, db, cfg, watch_only=False):
     watch = [x.casefold() for x in cfg.get('watch_keywords',[])]
     rows = db.execute('SELECT * FROM deals WHERE pending=1 ORDER BY updated').fetchall()
+    sent_count = 0
     for row in rows:
         if watch_only and not any(w in row['body'].casefold() for w in watch):
             continue
@@ -48,10 +52,12 @@ async def send_pending(client, db, cfg, watch_only=False):
                  'Original posts:', *[s[0] for s in sources],
                  'Check variant, seller, coupon, Prime and checkout price.'])
         # Delivery is at-least-once: a crash after sending may repeat one entry.
-        await client.send_message('me', body, parse_mode=None, link_preview=False)
+        await send_deal(client, body, row['source'], row['asin'])
         db.execute('UPDATE deals SET pending=0,notified=1,last_sent=cents WHERE asin=?',(row['asin'],))
         db.commit()
+        sent_count += 1
         await asyncio.sleep(1)
+    LOG.info('%s delivery: %s products sent.', 'Watchlist' if watch_only else 'Digest', sent_count)
 
 async def poll(client, db, cfg, http):
     from telethon import utils
@@ -120,8 +126,7 @@ async def main(command):
             raise ValueError('Set at least one channel ID in config.json.')
         if not 0 < cfg['price_drop_percent'] < 100:
             raise ValueError('price_drop_percent must be between 0 and 100.')
-        for slot in cfg['digest_times']:
-            datetime.strptime(slot,'%H:%M')
+        schedule = DigestSchedule(cfg)
         zone = ZoneInfo(cfg['timezone'])
         db = database('/data/deals.sqlite')
         timeout = aiohttp.ClientTimeout(total=12)
@@ -132,14 +137,15 @@ async def main(command):
                     await send_pending(client,db,cfg,watch_only=True)
                     now = datetime.now(zone)
                     # Catch up a missed slot on restart; send only latest due slot.
-                    due = [s for s in cfg['digest_times'] if s <= now.strftime('%H:%M')]
-                    if due:
-                        slot = now.strftime('%Y-%m-%d')+' '+max(due)
+                    slot = schedule.latest_due(now)
+                    if slot:
                         if getstate(db,'digest_slot') != slot:
                             await send_pending(client,db,cfg)
+                            LOG.info('Digest slot %s processed.', slot)
                             setstate(db,'digest_slot',slot)
                             db.commit()
-                    LOG.info('Collection cycle completed.')
+                    total, pending = db.execute('SELECT COUNT(*), COALESCE(SUM(pending),0) FROM deals').fetchone()
+                    LOG.info('Collection cycle completed: %s products stored, %s pending.', total, pending)
                 except Exception as exc:
                     LOG.error('Cycle failed: %s; retrying next cycle.',type(exc).__name__)
                 await asyncio.sleep(max(30,cfg.get('poll_seconds',120)))
