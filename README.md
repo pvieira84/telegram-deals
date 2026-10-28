@@ -243,3 +243,25 @@ is linked using `https://www.amazon.es/dp/ASIN`.
 This applies to newly scanned posts. Previously skipped source messages have
 already advanced the cursor and are not automatically replayed. Existing deals,
 deduplication history, and configured channel IDs are preserved during upgrade.
+
+## Cupões Tá Fixe landing pages and Amazon short links
+
+The collector can now fetch HTTPS landing pages on `cupoestafixe.com` and
+`www.cupoestafixe.com`, including WordPress `?p=...` links. It reads HTML links,
+preferring article-content regions and excluding navigation/sidebars. Supported
+Amazon short links (`amzn.eu`, `amzn.to`, `link.amazon`, and the `amzlinks.in`
+intermediary) are followed through bounded redirects to extract the destination
+product ID. Short-link tokens are treated as opaque, even when they happen to
+look like ASINs. Outgoing product links remain canonical Amazon Spain links.
+
+No JavaScript is executed. HTTP errors, challenges, oversized pages, missing
+links and pages resolving to multiple distinct products are logged and skipped.
+HTML is limited to 1 MiB, redirects to eight hops, and candidate links to eight.
+Only explicit allowlisted HTTPS hosts are fetched; arbitrary linked websites
+are not visited. This adds requests from your server to Cupões Tá Fixe and the
+supported Amazon short-link hosts. Live behaviour depends on those sites; the
+example page could not be retrieved in the development environment, so tests
+cover representative HTML and redirect responses rather than a live page.
+
+Rebuild the image after updating: `resolver.py` is a new application module.
+This affects new posts; previously skipped messages are not replayed.

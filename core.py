@@ -28,6 +28,8 @@ def embedded_asins(url):
         return set()
     if u.scheme.lower() not in {'http', 'https'} or not u.hostname:
         return set()
+    if (u.hostname or '').lower() in {'link.amazon', 'amzn.eu', 'amzn.to', 'amzlinks.in', 'www.amzlinks.in'}:
+        return set()
     payload = u.path + '?' + u.query + '#' + u.fragment
     for _ in range(3):
         decoded = unquote(payload)
@@ -108,7 +110,7 @@ def product_excerpt(text):
     def replace(match):
         url = match.group(0)
         host = (urlsplit(url).hostname or '').lower()
-        if embedded_asins(url) or host in {'amzn.eu', 'amzn.to'} or re.fullmatch(r'(?:[a-z0-9-]+\.)?amazon\.[a-z.]+', host):
+        if embedded_asins(url) or host in {'amzn.eu', 'amzn.to', 'link.amazon', 'amzlinks.in', 'www.amzlinks.in'} or re.fullmatch(r'(?:[a-z0-9-]+\.)?amazon\.[a-z.]+', host):
             return '[Amazon link below]'
         return url
     return URL.sub(replace, text)[:900]

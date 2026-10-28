@@ -14,6 +14,7 @@ from core import URL, product, price, database, getstate, setstate, record, cano
 
 from media import send_deal, source_reference
 from schedule import DigestSchedule
+from resolver import resolve_all
 
 LOG = logging.getLogger('deals')
 
@@ -48,30 +49,8 @@ def log_product_counts(db):
     LOG.info('Pending products: %s', pending)
 
 async def resolve(url, http):
-    # Follow only explicitly configured retail shorteners. No arbitrary URL fetching.
-    from urllib.parse import urlsplit, urljoin
-    current = url
-    for _ in range(6):
-        asin = product(current)
-        if asin:
-            return asin
-        embedded = embedded_asins(current)
-        if len(embedded) == 1:
-            return next(iter(embedded))
-        u = urlsplit(current)
-        if u.scheme != 'https' or u.port not in (None,443) or u.username or u.password:
-            return None
-        if (u.hostname or '').lower() not in {'amzn.eu','amzn.to','www.amazon.es','amazon.es'}:
-            return None
-        try:
-            async with http.get(current, allow_redirects=False) as response:
-                if response.status not in (301,302,303,307,308):
-                    return None
-                current = urljoin(current, response.headers.get('Location',''))
-        except Exception:
-            LOG.warning('A retail link could not be resolved (details omitted).')
-            return None
-    return None
+    found = await resolve_all(url, http)
+    return next(iter(found)) if len(found) == 1 else None
 
 async def channel_name(client, db, source):
     ref = source_reference(source)
@@ -164,8 +143,7 @@ async def poll_channel(client, db, cfg, http, channel, observed):
             cleaned = url.rstrip(').,;!')
             linked = embedded_asins(cleaned)
             if not linked:
-                asin = await resolve(cleaned,http)
-                linked = {asin} if asin else set()
+                linked = await resolve_all(cleaned,http)
             if linked:
                 asins.update(linked)
             else:
