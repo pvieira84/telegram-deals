@@ -15,6 +15,32 @@ from schedule import DigestSchedule
 
 LOG = logging.getLogger('deals')
 
+
+def log_config(cfg):
+    # Log collector options only; never dump environment variables or credentials.
+    options = {
+        'channels': cfg.get('channels', []),
+        'timezone': cfg.get('timezone'),
+        'digest_cron': cfg.get('digest_cron'),
+        'digest_times': cfg.get('digest_times', ['12:30', '20:30']) if cfg.get('digest_cron') is None else cfg.get('digest_times'),
+        'poll_seconds': max(30, cfg.get('poll_seconds', 120)),
+        'price_drop_percent': cfg.get('price_drop_percent'),
+        'include_keywords': cfg.get('include_keywords', []),
+        'exclude_keywords': cfg.get('exclude_keywords', []),
+        'watch_keywords': cfg.get('watch_keywords', []),
+        'max_price_eur': cfg.get('max_price_eur'),
+    }
+    LOG.info('Collector configuration:')
+    for key, value in options.items():
+        LOG.info('  %s: %s', key, json.dumps(value, ensure_ascii=False))
+    LOG.info('Active digest schedule: %s', 'digest_cron' if cfg.get('digest_cron') is not None else 'digest_times')
+
+
+def log_product_counts(db):
+    total, pending = db.execute('SELECT COUNT(*), COALESCE(SUM(pending),0) FROM deals').fetchone()
+    LOG.info('Products collected: %s', total)
+    LOG.info('Pending products: %s', pending)
+
 async def resolve(url, http):
     # Follow only explicitly configured retail shorteners. No arbitrary URL fetching.
     from urllib.parse import urlsplit, urljoin
@@ -105,6 +131,9 @@ async def main(command):
     import aiohttp
     os.umask(0o077)
     Path('/data').mkdir(exist_ok=True)
+    if command == 'run':
+        cfg = json.loads(Path('/app/config.json').read_text())
+        log_config(cfg)
     api_id = int(os.environ['TG_API_ID'])
     client = TelegramClient('/data/telegram',api_id,os.environ['TG_API_HASH'],flood_sleep_threshold=60)
     if command == 'login':
@@ -121,7 +150,6 @@ async def main(command):
                 if dialog.is_channel or dialog.is_group:
                     print(f'{dialog.id}\t{dialog.name}')
             return
-        cfg = json.loads(Path('/app/config.json').read_text())
         if not cfg['channels']:
             raise ValueError('Set at least one channel ID in config.json.')
         if not 0 < cfg['price_drop_percent'] < 100:
@@ -144,10 +172,11 @@ async def main(command):
                             LOG.info('Digest slot %s processed.', slot)
                             setstate(db,'digest_slot',slot)
                             db.commit()
-                    total, pending = db.execute('SELECT COUNT(*), COALESCE(SUM(pending),0) FROM deals').fetchone()
-                    LOG.info('Collection cycle completed: %s products stored, %s pending.', total, pending)
+                    LOG.info('Collection cycle completed.')
                 except Exception as exc:
                     LOG.error('Cycle failed: %s; retrying next cycle.',type(exc).__name__)
+                finally:
+                    log_product_counts(db)
                 await asyncio.sleep(max(30,cfg.get('poll_seconds',120)))
     finally:
         await client.disconnect()
