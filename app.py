@@ -10,7 +10,7 @@ from datetime import datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
-from core import URL, product, price, database, getstate, setstate, record, canonical_url, product_excerpt
+from core import URL, product, price, database, getstate, setstate, record, canonical_url, product_excerpt, embedded_asins
 
 from media import send_deal, source_reference
 from schedule import DigestSchedule
@@ -55,6 +55,9 @@ async def resolve(url, http):
         asin = product(current)
         if asin:
             return asin
+        embedded = embedded_asins(current)
+        if len(embedded) == 1:
+            return next(iter(embedded))
         u = urlsplit(current)
         if u.scheme != 'https' or u.port not in (None,443) or u.username or u.password:
             return None
@@ -159,9 +162,12 @@ async def poll_channel(client, db, cfg, http, channel, observed):
         for url in set(urls):
             counts['links'] += 1
             cleaned = url.rstrip(').,;!')
-            asin = await resolve(cleaned,http)
-            if asin:
-                asins.add(asin)
+            linked = embedded_asins(cleaned)
+            if not linked:
+                asin = await resolve(cleaned,http)
+                linked = {asin} if asin else set()
+            if linked:
+                asins.update(linked)
             else:
                 # Hostnames only: never print affiliate query strings or full URLs.
                 try:

@@ -60,7 +60,7 @@ class ChannelScanTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.db.execute('SELECT COUNT(*) FROM deals').fetchone()[0],1)
 
     async def test_hidden_and_button_links_from_different_channels_merge(self):
-        c=Client({-100123:[msg(1,'Offer',entities=[HiddenLink('https://amazon.es/dp/B012345678')])],
+        c=Client({-100123:[msg(1,'Offer',entities=[HiddenLink('https://boacena.pt/oferta/B012345678?affiliate=test')])],
                   -100456:[msg(2,'Offer',buttons=[[Obj(url='https://amazon.es/dp/B012345678')]])]})
         with self.assertLogs('deals',level='INFO') as logs:
             await poll(c,self.db,self.cfg,None)

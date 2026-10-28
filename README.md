@@ -217,3 +217,29 @@ case applies. Only allowlisted retail links are resolved; arbitrary websites
 are not followed. Share a representative post/link if a source needs a new
 supported format. Product summaries alone show successful matches and do not
 indicate which other channels were scanned.
+
+
+## ASINs embedded in external links
+
+The collector now inspects URL paths, query strings and fragments on any HTTP(S)
+host for embedded product IDs, before considering a network request. This
+supports publisher links such as `https://boacena.pt/B0CFVYPKGB` and links with
+percent-encoded Amazon destinations. Up to three encoding layers are decoded.
+Repeated IDs are merged; multiple different IDs in one URL are all collected.
+
+Generic URL tokens must match the common `B0` plus eight alphanumeric characters
+and must not be part of a longer alphanumeric ID. Explicit `asin=` parameters
+and Amazon-style `/dp/`, `/gp/product/` and `/gp/aw/d/` paths also accept other
+ten-character ASIN formats. Matching is case-insensitive. Hostnames and URL
+credentials are never searched. This is a format heuristic, not Amazon product
+verification; an unrelated ID with the same form could still match.
+
+External sites are not visited just to extract an embedded ID; the existing
+network redirect allowlist stays in place. Posts without a recognisable embedded
+ID still need a supported direct/short Amazon link. External links containing
+recognised ASINs are replaced in the outgoing excerpt, and the selected product
+is linked using `https://www.amazon.es/dp/ASIN`.
+
+This applies to newly scanned posts. Previously skipped source messages have
+already advanced the cursor and are not automatically replayed. Existing deals,
+deduplication history, and configured channel IDs are preserved during upgrade.

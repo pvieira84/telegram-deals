@@ -1,6 +1,6 @@
 import re
 import sqlite3
-from urllib.parse import urlsplit
+from urllib.parse import urlsplit, unquote
 from decimal import Decimal
 
 URL = re.compile(r'https?://[^\s<>]+', re.I)
@@ -14,6 +14,33 @@ def product(url):
         return None
     m = ASIN.search(u.path)
     return m[1].upper() if m else None
+
+def embedded_asins(url):
+    """Find likely product IDs in a URL without visiting the linked website.
+
+    Generic links require the common B0 + eight alphanumeric form. Explicit
+    asin parameters and Amazon-style product paths also accept ten-character
+    ASINs. Only path/query/fragment are searched, never hostnames or credentials.
+    """
+    try:
+        u = urlsplit(url)
+    except ValueError:
+        return set()
+    if u.scheme.lower() not in {'http', 'https'} or not u.hostname:
+        return set()
+    payload = u.path + '?' + u.query + '#' + u.fragment
+    for _ in range(3):
+        decoded = unquote(payload)
+        if decoded == payload:
+            break
+        payload = decoded
+    found = set(re.findall(r'(?<![A-Z0-9])(B0[A-Z0-9]{8})(?![A-Z0-9])', payload, re.I))
+    found.update(ASIN.findall(payload))
+    # Explicit asin fields can contain older ASINs or book identifiers too.
+    for match in re.finditer(r'(?:^|[?&#])asin=([A-Z0-9]{10})(?=$|[&#])', payload, re.I):
+        found.add(match[1])
+    return {asin.upper() for asin in found}
+
 
 def price(text):
     values = []
@@ -81,7 +108,7 @@ def product_excerpt(text):
     def replace(match):
         url = match.group(0)
         host = (urlsplit(url).hostname or '').lower()
-        if host in {'amzn.eu', 'amzn.to'} or re.fullmatch(r'(?:[a-z0-9-]+\.)?amazon\.[a-z.]+', host):
+        if embedded_asins(url) or host in {'amzn.eu', 'amzn.to'} or re.fullmatch(r'(?:[a-z0-9-]+\.)?amazon\.[a-z.]+', host):
             return '[Amazon link below]'
         return url
     return URL.sub(replace, text)[:900]
